@@ -523,6 +523,7 @@ add_custom_command(
 # PAD/Linux sources 
 set(pcsx2PADSources
     PAD/Linux/Device.cpp
+	PAD/Linux/InputManager.cpp
     PAD/Linux/SDL/joystick.cpp
     PAD/Linux/keyboard.cpp
     PAD/Linux/KeyStatus.cpp
@@ -543,6 +544,7 @@ set(pcsx2PADHeaders
     PAD/Linux/Config.h
     PAD/Linux/Device.h
 	PAD/Linux/Global.h
+	PAD/Linux/InputManager.h
     PAD/Linux/SDL/joystick.h
     PAD/Linux/keyboard.h
     PAD/Linux/KeyStatus.h
