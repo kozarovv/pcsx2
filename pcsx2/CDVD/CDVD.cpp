@@ -36,10 +36,9 @@
 // this string will be empty.
 wxString DiscSerial;
 
-cdvdStruct cdvd;
+static cdvdStruct cdvd;
 
 s64 PSXCLK = 36864000;
-
 
 static __fi void SetResultSize(u8 size)
 {
@@ -575,6 +574,12 @@ s32 cdvdCtrlTrayOpen()
 	DiscSwapTimerSeconds = cdvd.RTC.second; // remember the PS2 time when this happened
 	cdvd.Status = CDVD_STATUS_TRAY_OPEN;
 	cdvd.Ready = CDVD_NOTREADY;
+    
+	// Mark the tray state as changed now, before loading the disc.
+	// This matches the hardware behavior, even though it's
+	// less intuitive than changing it on close.
+	cdvd.TrayChanged = true;
+	cdvd.TrayTimeout = 3;
 
 	return 0; // needs to be 0 for success according to homebrew test "CDVD"
 }
@@ -584,24 +589,26 @@ s32 cdvdCtrlTrayClose()
 	DevCon.WriteLn(Color_Green, L"Close virtual disk tray");
 	cdvd.Status = CDVD_STATUS_PAUSE;
 	cdvd.Ready = CDVD_READY1;
-	cdvd.TrayTimeout = 0; // Reset so it can't get closed twice by cdvdVsync()
 
 	cdvdDetectDisk();
 	GetCoreThread().ApplySettings(g_Conf->EmuOptions);
+	
+	if (cdvd.Type == CDVD_TYPE_NODISC)
+	{
+		// No disc. We're stopped with no future status to trigger.
+		cdvd.Status = CDVD_STATUS_PAUSE;
+		cdvd.TrayTimeout = 0;
+	}
+	else
+	{
+		// Simulate reading the disc with a seek. This follows
+		// hardware behavior and is required by SingStar games.
+		// Set the tray timeout so that the status gets updated later.
+		cdvd.Status = CDVD_STATUS_SEEK;
+		cdvd.TrayTimeout = 3;
+	}
 
 	return 0; // needs to be 0 for success according to homebrew test "CDVD"
-}
-
-// Some legacy function, not used anymore
-s32 cdvdGetTrayStatus()
-{
-	/*s32 ret = CDVD->getTrayStatus();
-
-	if (ret == -1)
-		return(CDVD_TRAY_CLOSE);
-	else
-		return(ret);*/
-	return -1;
 }
 
 // Note: Is tray status being kept as a var here somewhere?
@@ -1056,6 +1063,50 @@ static uint cdvdStartSeek(uint newsector, CDVD_MODE_TYPE mode)
 
 u8 monthmap[13] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
+// This function manages moving the cdvd status from OPEN or SEEK
+// to PAUSE. TrayTimeout is used to manage time moving the status ahead.
+// There are two possible sequences of status:
+// When a disc is inserted or swapped: OPEN -> SEEK -> PAUSE (done)
+// When a disc is removed ("no disc"): OPEN -> PAUSE (done)
+// Any process that interrupts this sequence is responsible
+// for resetting TrayTimeout appropriately. (Example:
+// A game may close the tray before the timeout triggers, so
+// cdvdCtrlTrayClose is required to reset TrayTimeout.)
+//
+// Disc swapping is complete (or irrelevant) when TrayTimeout < 1.
+// A state transition is being triggered when TrayTimeout == 1.
+// A state transition is not yet ready if TrayTimeout > 1.
+static __fi void cdvdUpdateTrayState()
+{
+	if (cdvd.TrayTimeout < 1) return;
+
+	if (cdvd.TrayTimeout > 1)
+	{
+		// Nothing triggered yet.
+		--cdvd.TrayTimeout;
+	}
+	else if (cdvd.Status == CDVD_STATUS_TRAY_OPEN)
+	{
+		// Time to close the tray.
+		CDVD_LOG("TrayTimeout: OPEN -> closing.");
+		cdvdCtrlTrayClose();
+	}
+	else if (cdvd.Status == CDVD_STATUS_SEEK)
+	{
+		// Time to stop faking a new-media seek. Move to pause and be done.
+		CDVD_LOG("TrayTimeout: SEEK -> PAUSE. Clearing TrayTimeout.");
+		cdvd.Status = CDVD_STATUS_PAUSE;
+		cdvd.TrayTimeout = 0;
+	}
+	else
+	{
+		// Unexpected state in our sequence. Assume some other process is in effect
+		// and forget about future tray changes. This is not likely a cause for concern.
+		CDVD_LOG("TrayTimeout: Unexpected status %02x. Clearing TrayTimeout.", cdvd.Status);
+		cdvd.TrayTimeout = 0;
+	}
+}
+
 void cdvdVsync()
 {
 	cdvd.RTCcount++;
@@ -1063,15 +1114,7 @@ void cdvdVsync()
 		return;
 	cdvd.RTCcount = 0;
 
-	if (cdvd.Status == CDVD_STATUS_TRAY_OPEN)
-	{
-		cdvd.TrayTimeout++;
-	}
-	if (cdvd.TrayTimeout > 3)
-	{
-		cdvdCtrlTrayClose();
-		cdvd.TrayTimeout = 0;
-	}
+    cdvdUpdateTrayState();
 
 	cdvd.RTC.second++;
 	if (cdvd.RTC.second < 60)
@@ -1148,14 +1191,12 @@ u8 cdvdRead(u8 key)
 			CDVD_LOG("cdvdRead0A(Status) %x", cdvd.Status);
 			return cdvd.Status;
 
-		case 0x0B: // TRAY-STATE (if tray has been opened)
+		case 0x0B: // TRAY CHANGED (if tray has been opened)
 		{
-			CDVD_LOG("cdvdRead0B(Tray) (1 open, 0 closed): %x", cdvd.Status);
-			if (cdvd.Status == CDVD_STATUS_TRAY_OPEN)
-				return 1;
-			else
-				return 0;
-		}
+			CDVD_LOG("cdvdRead0B(TrayChanged): %x", cdvd.TrayChanged);
+            // The return value is assigned to the second argument of sceCdTrayReq(int, uint *)
+			return cdvd.TrayChanged;
+        }
 		case 0x0C: // CRT MINUTE
 			CDVD_LOG("cdvdRead0C(Min) %x", itob((u8)(cdvd.Sector / (60 * 75))));
 			return itob((u8)(cdvd.Sector / (60 * 75)));
@@ -1569,6 +1610,7 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 				// Gonna have to investigate further. (rama)
 
 				//Console.Warning("CdTrayReqState. cdvd.Status = %d", cdvd.Status);
+				cdvd.TrayChanged = false;
 				SetResultSize(1);
 
 				if (cdvd.Status == CDVD_STATUS_TRAY_OPEN)
