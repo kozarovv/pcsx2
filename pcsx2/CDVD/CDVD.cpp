@@ -576,7 +576,7 @@ s32 cdvdCtrlTrayOpen()
 	cdvd.Ready = CDVD_NOTREADY;
     
 	// Mark the tray state as changed now, before loading the disc.
-	// This matches the hardware behavior, even though it's
+	// This matches the hardware behavior, even though it seems
 	// less intuitive than changing it on close.
 	cdvd.TrayChanged = true;
 	cdvd.TrayTimeout = 3;
