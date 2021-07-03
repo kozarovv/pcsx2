@@ -36,7 +36,7 @@
 // this string will be empty.
 wxString DiscSerial;
 
-static cdvdStruct cdvd;
+cdvdStruct cdvd;
 
 s64 PSXCLK = 36864000;
 
